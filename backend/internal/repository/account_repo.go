@@ -592,6 +592,19 @@ func (r *accountRepository) BatchUpdateLastUsed(ctx context.Context, updates map
 }
 
 func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg string) error {
+	if id <= 0 {
+		return service.ErrAccountNotFound
+	}
+
+	autoDelete := shouldAutoDeleteFailedAccount(errorMsg)
+	if autoDelete {
+		if err := r.Delete(ctx, id); err != nil {
+			return err
+		}
+		logger.LegacyPrintf("repository.account", "[AccountAutoDelete] deleted failed account: account=%d reason=%q", id, errorMsg)
+		return nil
+	}
+
 	_, err := r.client.Account.Update().
 		Where(dbaccount.IDEQ(id)).
 		SetStatus(service.StatusError).
@@ -605,6 +618,36 @@ func (r *accountRepository) SetError(ctx context.Context, id int64, errorMsg str
 	}
 	r.syncSchedulerAccountSnapshot(ctx, id)
 	return nil
+}
+
+func shouldAutoDeleteFailedAccount(errorMsg string) bool {
+	msg := strings.TrimSpace(strings.ToLower(errorMsg))
+	if msg == "" {
+		return false
+	}
+
+	failMarkers := []string{
+		" fail ",
+		" fail:",
+		" fail-",
+		" fail_",
+		" failed",
+		" failed:",
+		" failure",
+		"status=fail",
+		"status:fail",
+		"status fail",
+		"\"fail\"",
+		"'fail'",
+		"失败",
+	}
+	wrapped := " " + msg + " "
+	for _, marker := range failMarkers {
+		if strings.Contains(wrapped, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // syncSchedulerAccountSnapshot 在账号状态变更时主动同步快照到调度器缓存。

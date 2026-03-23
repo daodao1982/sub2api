@@ -867,3 +867,30 @@ func idsOfAccounts(accounts []service.Account) []int64 {
 	}
 	return out
 }
+
+func (s *AccountRepoSuite) TestSetError_AutoDeletesExplicitFailAccount() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-fail-delete", Status: service.StatusActive})
+	cacheRecorder := &schedulerCacheRecorder{}
+	s.repo.schedulerCache = cacheRecorder
+
+	s.Require().NoError(s.repo.SetError(s.ctx, account.ID, "upstream account entered Fail status"))
+
+	exists, err := s.repo.ExistsByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().False(exists)
+	s.Require().Empty(cacheRecorder.setAccounts)
+}
+
+func (s *AccountRepoSuite) TestSetError_DoesNotAutoDeleteGenericError() {
+	account := mustCreateAccount(s.T(), s.client, &service.Account{Name: "acc-error-keep", Status: service.StatusActive})
+
+	s.Require().NoError(s.repo.SetError(s.ctx, account.ID, "temporary upstream auth error"))
+
+	exists, err := s.repo.ExistsByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().True(exists)
+
+	got, err := s.repo.GetByID(s.ctx, account.ID)
+	s.Require().NoError(err)
+	s.Require().Equal(service.StatusError, got.Status)
+}
