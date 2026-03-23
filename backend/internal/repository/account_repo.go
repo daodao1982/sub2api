@@ -1220,6 +1220,16 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 		return nil
 	}
 
+	// 自动删除 privacy_mode 为 training_set_failed 的账号
+	if privacyMode, ok := updates["privacy_mode"].(string); ok && privacyMode == "training_set_failed" {
+		if err := r.Delete(ctx, id); err != nil {
+			logger.LegacyPrintf("repository.account", "[AccountAutoDelete] failed to delete account with privacy_mode=training_set_failed: account=%d err=%v", id, err)
+			return err
+		}
+		logger.LegacyPrintf("repository.account", "[AccountAutoDelete] deleted account due to privacy_mode=training_set_failed: account=%d", id)
+		return nil
+	}
+
 	// 使用 JSONB 合并操作实现原子更新，避免读-改-写的并发丢失更新问题
 	payload, err := json.Marshal(updates)
 	if err != nil {
