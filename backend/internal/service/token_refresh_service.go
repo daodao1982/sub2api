@@ -27,7 +27,9 @@ type TokenRefreshService struct {
 	schedulerCache   SchedulerCache   // 用于同步更新调度器缓存，解决 token 刷新后缓存不一致问题
 	tempUnschedCache TempUnschedCache // 用于清除 Redis 中的临时不可调度缓存
 	refreshAPI       *OAuthRefreshAPI // 统一刷新 API
+	accountTestSvc   *AccountTestService
 
+	healthCheckInterval time.Duration
 	// OpenAI privacy: 刷新成功后检查并设置 training opt-out
 	privacyClientFactory PrivacyClientFactory
 	proxyRepo            ProxyRepository
@@ -112,6 +114,11 @@ func (s *TokenRefreshService) SetRefreshPolicy(policy BackgroundRefreshPolicy) {
 	s.refreshPolicy = policy
 }
 
+// SetAccountTestSvc sets the AccountTestService for proactive health probing.
+func (s *TokenRefreshService) SetAccountTestSvc(svc *AccountTestService) {
+	s.accountTestSvc = svc
+}
+
 // Start 启动后台刷新服务
 func (s *TokenRefreshService) Start() {
 	if !s.cfg.Enabled {
@@ -144,16 +151,26 @@ func (s *TokenRefreshService) refreshLoop() {
 	if checkInterval < time.Minute {
 		checkInterval = 5 * time.Minute
 	}
+	healthInterval := s.healthCheckInterval
+	if healthInterval <= 0 {
+		healthInterval = 4 * time.Hour
+	}
+
 	refreshTicker := time.NewTicker(checkInterval)
 	defer refreshTicker.Stop()
+	healthTicker := time.NewTicker(healthInterval)
+	defer healthTicker.Stop()
 
 	// 启动时立即执行一次检查
 	s.processRefresh()
+	go s.processHealthCheck()
 
 	for {
 		select {
 		case <-refreshTicker.C:
 			s.processRefresh()
+		case <-healthTicker.C:
+			go s.processHealthCheck()
 		case <-s.stopCh:
 			return
 		}
@@ -249,6 +266,100 @@ func (s *TokenRefreshService) processRefresh() {
 // 使用ListActive确保刷新所有活跃账号的token（包括临时禁用的）
 func (s *TokenRefreshService) listActiveAccounts(ctx context.Context) ([]Account, error) {
 	return s.accountRepo.ListActive(ctx)
+}
+
+const healthCheckMaxConcurrent = 20
+const healthCheckMaxProbeAccounts = 500 // per cycle
+
+func (s *TokenRefreshService) processHealthCheck() {
+	if s.accountTestSvc == nil {
+		return
+	}
+	ctx := context.Background()
+	accounts, err := s.listActiveAccounts(ctx)
+	if err != nil {
+		slog.Error("token_health_check.list_accounts_failed", "error", err)
+		return
+	}
+
+	// Only probe OpenAI OAuth accounts
+	var openaiOAuth []Account
+	for i := range accounts {
+		if accounts[i].Platform == PlatformOpenAI && accounts[i].Type == AccountTypeOAuth {
+			openaiOAuth = append(openaiOAuth, accounts[i])
+		}
+	}
+	if len(openaiOAuth) == 0 {
+		return
+	}
+
+	// Limit per cycle to avoid excessive resource usage
+	if len(openaiOAuth) > healthCheckMaxProbeAccounts {
+		openaiOAuth = openaiOAuth[:healthCheckMaxProbeAccounts]
+	}
+
+	sem := make(chan struct{}, healthCheckMaxConcurrent)
+	var mu sync.Mutex
+	checked, deleted := 0, 0
+	var wg sync.WaitGroup
+
+	for i := range openaiOAuth {
+		account := &openaiOAuth[i]
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(a *Account) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			probeErr := s.accountTestSvc.ProbeAccountHealth(probeCtx, a)
+			mu.Lock()
+			checked++
+			mu.Unlock()
+
+			if probeErr == nil {
+				return // alive
+			}
+
+			errMsg := probeErr.Error()
+			msg := strings.ToLower(strings.TrimSpace(errMsg))
+			deleteMarkers := []string{
+				"token_invalidated",
+				"refresh_token_reused",
+				"authentication token has been invalidated",
+				"your authentication token has been invalidated",
+				"account has been deactivated",
+				"your openai account has been deactivated",
+				"deactivated",
+				"unauthorized",
+				"invalid api key",
+				"access_denied",
+				"forbidden",
+			}
+			shouldDelete := false
+			for _, marker := range deleteMarkers {
+				if strings.Contains(msg, marker) {
+					shouldDelete = true
+					break
+				}
+			}
+			if shouldDelete {
+				delMsg := fmt.Sprintf("scheduled health probe detected invalid account: %s", errMsg)
+				if delErr := s.accountRepo.SetError(ctx, a.ID, delMsg); delErr != nil {
+					slog.Warn("token_health_check.delete_failed", "account_id", a.ID, "error", delErr)
+				} else {
+					mu.Lock()
+					deleted++
+					mu.Unlock()
+					slog.Info("token_health_check.account_deleted", "account_id", a.ID, "account_name", a.Name, "reason", errMsg)
+				}
+			}
+		}(account)
+	}
+	wg.Wait()
+	slog.Info("token_health_check.cycle_completed", "total_openai_oauth", len(openaiOAuth), "probed", checked, "deleted", deleted)
 }
 
 // refreshWithRetry 带重试的刷新

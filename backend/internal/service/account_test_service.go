@@ -1760,6 +1760,59 @@ func (s *AccountTestService) sendErrorAndEnd(c *gin.Context, errorMsg string) er
 	return fmt.Errorf("%s", errorMsg)
 }
 
+// ProbeAccountHealth makes a lightweight HTTP request to check if an OpenAI OAuth account is alive.
+// Returns nil if the account is accessible, or an error describing the failure.
+func (s *AccountTestService) ProbeAccountHealth(ctx context.Context, account *Account) error {
+	if account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth {
+		return fmt.Errorf("probe only supports OpenAI OAuth accounts")
+	}
+	authToken := account.GetOpenAIAccessToken()
+	if authToken == "" {
+		return fmt.Errorf("missing access_token")
+	}
+	baseURL := account.GetOpenAIBaseURL()
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	}
+	apiURL := baseURL + "/v1/responses"
+
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	payload := map[string]any{
+		"model": "gpt-4.1-nano",
+		"input": "hi",
+		"max_output_tokens": 1,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(probeCtx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("probe request build failed: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+authToken)
+	if chatgptAccountID := account.GetChatGPTAccountID(); chatgptAccountID != "" {
+		req.Header.Set("chatgpt-account-id", chatgptAccountID)
+	}
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	resp, err := s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, false)
+	if err != nil {
+		return fmt.Errorf("probe request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return nil // alive
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	return fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+}
+
 // RunTestBackground executes an account test in-memory (no real HTTP client),
 // capturing SSE output via httptest.NewRecorder, then parses the result.
 func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID int64, modelID string) (*ScheduledTestResult, error) {
