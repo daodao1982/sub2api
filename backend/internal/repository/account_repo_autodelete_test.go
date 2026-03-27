@@ -16,6 +16,10 @@ func TestShouldAutoDeleteFailedAccount(t *testing.T) {
 		{name: "status equals fail", msg: "status=Fail", want: true},
 		{name: "quoted fail", msg: "account state 'Fail' detected", want: true},
 		{name: "chinese fail", msg: "账号失败，请删除", want: true},
+		{name: "token invalidated", msg: "Your authentication token has been invalidated. Please try signing in again.", want: true},
+		{name: "refresh token reused", msg: "token refresh failed: status 401, code: refresh_token_reused", want: true},
+		{name: "account deactivated", msg: "Your OpenAI account has been deactivated", want: true},
+		{name: "unauthorized", msg: "upstream unauthorized", want: true},
 		{name: "unrelated message", msg: "temporary overload cooldown", want: false},
 	}
 

@@ -666,3 +666,24 @@ func TestPathA_DBUpdateFailed(t *testing.T) {
 	require.Equal(t, 1, repo.updateCalls)  // DB 更新被尝试
 	require.Equal(t, 0, invalidator.calls) // DB 失败时不应触发缓存失效
 }
+
+
+func TestIsAccountHealthCheckDeleteCandidate(t *testing.T) {
+	tests := []struct {
+		name string
+		account *Account
+		want bool
+	}{
+		{name: "non_openai", account: &Account{Platform: PlatformGemini, Type: AccountTypeOAuth, ErrorMessage: "token_invalidated"}, want: false},
+		{name: "non_oauth", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, ErrorMessage: "token_invalidated"}, want: false},
+		{name: "token_invalidated", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ErrorMessage: "Your authentication token has been invalidated"}, want: true},
+		{name: "refresh_token_reused", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ErrorMessage: "refresh_token_reused"}, want: true},
+		{name: "deactivated", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ErrorMessage: "Your OpenAI account has been deactivated"}, want: true},
+		{name: "empty", account: &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, ErrorMessage: ""}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isAccountHealthCheckDeleteCandidate(tt.account))
+		})
+	}
+}

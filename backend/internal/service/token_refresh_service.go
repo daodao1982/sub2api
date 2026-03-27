@@ -144,16 +144,15 @@ func (s *TokenRefreshService) refreshLoop() {
 	if checkInterval < time.Minute {
 		checkInterval = 5 * time.Minute
 	}
-
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+	refreshTicker := time.NewTicker(checkInterval)
+	defer refreshTicker.Stop()
 
 	// 启动时立即执行一次检查
 	s.processRefresh()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-refreshTicker.C:
 			s.processRefresh()
 		case <-s.stopCh:
 			return
@@ -424,6 +423,9 @@ func isNonRetryableRefreshError(err error) bool {
 		"unauthorized_client", // 客户端未授权
 		"access_denied",       // 访问被拒绝
 		"missing_project_id",  // 缺少 project_id
+		"refresh_token_reused",
+		"token_invalidated",
+		"deactivated",
 	}
 	for _, needle := range nonRetryable {
 		if strings.Contains(msg, needle) {

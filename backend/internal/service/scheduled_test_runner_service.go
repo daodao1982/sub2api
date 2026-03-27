@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
+	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/robfig/cron/v3"
@@ -18,6 +21,7 @@ type ScheduledTestRunnerService struct {
 	scheduledSvc   *ScheduledTestService
 	accountTestSvc *AccountTestService
 	rateLimitSvc   *RateLimitService
+	accountRepo    AccountRepository
 	cfg            *config.Config
 
 	cron      *cron.Cron
@@ -31,6 +35,7 @@ func NewScheduledTestRunnerService(
 	scheduledSvc *ScheduledTestService,
 	accountTestSvc *AccountTestService,
 	rateLimitSvc *RateLimitService,
+	accountRepo AccountRepository,
 	cfg *config.Config,
 ) *ScheduledTestRunnerService {
 	return &ScheduledTestRunnerService{
@@ -38,6 +43,7 @@ func NewScheduledTestRunnerService(
 		scheduledSvc:   scheduledSvc,
 		accountTestSvc: accountTestSvc,
 		rateLimitSvc:   rateLimitSvc,
+		accountRepo:    accountRepo,
 		cfg:            cfg,
 	}
 }
@@ -130,6 +136,11 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d SaveResult error: %v", plan.ID, err)
 	}
 
+	// Auto-delete: if test failed with a permanent account error, mark and delete.
+	if result.Status == "failed" && s.accountRepo != nil {
+		s.tryAutoDeleteFromTestFailure(ctx, plan.AccountID, plan.ID, result.ErrorMessage)
+	}
+
 	// Auto-recover account if test succeeded and auto_recover is enabled.
 	if result.Status == "success" && plan.AutoRecover {
 		s.tryRecoverAccount(ctx, plan.AccountID, plan.ID)
@@ -143,6 +154,39 @@ func (s *ScheduledTestRunnerService) runOnePlan(ctx context.Context, plan *Sched
 
 	if err := s.planRepo.UpdateAfterRun(ctx, plan.ID, time.Now(), nextRun); err != nil {
 		logger.LegacyPrintf("service.scheduled_test_runner", "[ScheduledTestRunner] plan=%d UpdateAfterRun error: %v", plan.ID, err)
+	}
+}
+
+
+// tryAutoDeleteFromTestFailure checks if a scheduled test failure indicates
+// a permanently invalid account (401, token_invalidated, etc.) and auto-deletes it.
+func (s *ScheduledTestRunnerService) tryAutoDeleteFromTestFailure(ctx context.Context, accountID int64, planID int64, errMsg string) {
+	if s.accountRepo == nil || errMsg == "" {
+		return
+	}
+	msg := strings.ToLower(strings.TrimSpace(errMsg))
+	deleteMarkers := []string{
+		"token_invalidated",
+		"refresh_token_reused",
+		"authentication token has been invalidated",
+		"your authentication token has been invalidated",
+		"account has been deactivated",
+		"your openai account has been deactivated",
+		"unauthorized",
+		"invalid api key",
+		"access_denied",
+		"forbidden",
+	}
+	for _, marker := range deleteMarkers {
+		if strings.Contains(msg, marker) {
+			errLogMsg := fmt.Sprintf("scheduled test detected invalid account: %s", errMsg)
+			if err := s.accountRepo.SetError(ctx, accountID, errLogMsg); err != nil {
+				slog.Warn("scheduled_test.auto_delete_failed", "account_id", accountID, "plan_id", planID, "error", err)
+			} else {
+				slog.Info("scheduled_test.auto_deleted_invalid_account", "account_id", accountID, "plan_id", planID, "reason", errMsg)
+			}
+			return
+		}
 	}
 }
 

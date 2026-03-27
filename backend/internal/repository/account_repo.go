@@ -640,6 +640,18 @@ func shouldAutoDeleteFailedAccount(errorMsg string) bool {
 		"\"fail\"",
 		"'fail'",
 		"失败",
+		"token_invalidated",
+		"refresh_token_reused",
+		"authentication token has been invalidated",
+		"your authentication token has been invalidated",
+		"account has been deactivated",
+		"your openai account has been deactivated",
+		"deactivated",
+		"unauthorized",
+		"invalid api key",
+		"access_denied",
+		"permission denied",
+		"forbidden",
 	}
 	wrapped := " " + msg + " "
 	for _, marker := range failMarkers {
