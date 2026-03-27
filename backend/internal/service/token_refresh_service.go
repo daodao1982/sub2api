@@ -153,7 +153,7 @@ func (s *TokenRefreshService) refreshLoop() {
 	}
 	healthInterval := s.healthCheckInterval
 	if healthInterval <= 0 {
-		healthInterval = 4 * time.Hour
+		healthInterval = 1 * time.Hour
 	}
 
 	refreshTicker := time.NewTicker(checkInterval)
@@ -268,8 +268,8 @@ func (s *TokenRefreshService) listActiveAccounts(ctx context.Context) ([]Account
 	return s.accountRepo.ListActive(ctx)
 }
 
-const healthCheckMaxConcurrent = 20
-const healthCheckMaxProbeAccounts = 500 // per cycle
+const healthCheckMaxConcurrent = 30
+const healthCheckMaxProbeAccounts = 2000 // per cycle
 
 func (s *TokenRefreshService) processHealthCheck() {
 	if s.accountTestSvc == nil {
