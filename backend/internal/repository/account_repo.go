@@ -626,24 +626,23 @@ func shouldAutoDeleteFailedAccount(errorMsg string) bool {
 		return false
 	}
 
-	failMarkers := []string{
-		" fail ",
-		" fail:",
-		" fail-",
-		" fail_",
-		" failed",
-		" failed:",
-		" failure",
-		"status=fail",
-		"status:fail",
-		"status fail",
-		"\"fail\"",
-		"'fail'",
-		"失败",
+	// 删除标准收紧：只对“已明确确认的认证失效/401”做自动删除。
+	// 不能再因为笼统的 fail/failed/failure 就直接删号，避免把 403/429/临时故障误删。
+	exact401Markers := []string{
+		"api returned 401",
+		"\"status\": 401",
+		"status 401",
+		"status=401",
+		"authentication failed (401)",
+		"token_invalidated",
+		"token revoked",
+		"token_revoked",
+		"authentication token has been invalidated",
+		"encountered invalidated oauth token",
+		"scheduled health probe detected invalid account",
 	}
-	wrapped := " " + msg + " "
-	for _, marker := range failMarkers {
-		if strings.Contains(wrapped, marker) {
+	for _, marker := range exact401Markers {
+		if strings.Contains(msg, marker) {
 			return true
 		}
 	}

@@ -35,7 +35,7 @@ var sseDataPrefix = regexp.MustCompile(`^data:\s*`)
 
 const (
 	testClaudeAPIURL   = "https://api.anthropic.com/v1/messages?beta=true"
-	chatgptCodexAPIURL = "https://chatgpt.com/backend-api/codex/responses"
+	chatgptCodexAPIURL = "https://api.openai.com/v1/chat/completions"
 	soraMeAPIURL       = "https://sora.chatgpt.com/backend/me" // Sora 用户信息接口，用于测试连接
 	soraBillingAPIURL  = "https://sora.chatgpt.com/backend/billing/subscriptions"
 	soraInviteMineURL  = "https://sora.chatgpt.com/backend/project_y/invite/mine"
@@ -453,13 +453,12 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 
 	if account.IsOAuth() {
 		isOAuth = true
-		// OAuth - use Bearer token with ChatGPT internal API
+		// OAuth - use Bearer token against the real OpenAI chat/completions endpoint.
 		authToken = account.GetOpenAIAccessToken()
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
 
-		// OAuth uses ChatGPT internal API
 		apiURL = chatgptCodexAPIURL
 		chatgptAccountID = account.GetChatGPTAccountID()
 	} else if account.Type == "apikey" {
@@ -489,7 +488,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	// Create OpenAI Responses API payload
+	// Create OpenAI Chat Completions API payload
 	payload := createOpenAITestPayload(testModelID, isOAuth)
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -505,13 +504,11 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+authToken)
 
-	// Set OAuth-specific headers for ChatGPT internal API
+	// Real OpenAI chat/completions validation path.
+	// Keep SSE accept header for stream responses; chatgpt-account-id is optional and not required here.
 	if isOAuth {
-		req.Host = "chatgpt.com"
 		req.Header.Set("accept", "text/event-stream")
-		if chatgptAccountID != "" {
-			req.Header.Set("chatgpt-account-id", chatgptAccountID)
-		}
+		_ = chatgptAccountID
 	}
 
 	// Get proxy URL
@@ -547,7 +544,12 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 				account.RateLimitResetAt = resetAt
 			}
 		}
-		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
+		errMsg := fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body))
+		// 收紧标准：仅真实接口确认 401 时，才允许后续自动删号链路介入。
+		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+		}
+		return s.sendErrorAndEnd(c, errMsg)
 	}
 
 	// Process SSE stream
@@ -1603,32 +1605,20 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 	}
 }
 
-// createOpenAITestPayload creates a test payload for OpenAI Responses API
+// createOpenAITestPayload creates a test payload for the real OpenAI Chat Completions API.
 func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 	payload := map[string]any{
 		"model": modelID,
-		"input": []map[string]any{
+		"messages": []map[string]any{
 			{
-				"role": "user",
-				"content": []map[string]any{
-					{
-						"type": "input_text",
-						"text": "hi",
-					},
-				},
+				"role":    "user",
+				"content": "hi",
 			},
 		},
-		"stream": true,
+		"max_tokens": 1,
+		"stream":     true,
 	}
-
-	// OAuth accounts using ChatGPT internal API require store: false
-	if isOAuth {
-		payload["store"] = false
-	}
-
-	// All accounts require instructions for Responses API
-	payload["instructions"] = openai.DefaultInstructions
-
+	_ = isOAuth
 	return payload
 }
 
@@ -1720,7 +1710,7 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 
 		switch eventType {
 		case "response.output_text.delta":
-			// OpenAI Responses API uses "delta" field for text content
+			// Backward-compatible handling for Responses-style SSE.
 			if delta, ok := data["delta"].(string); ok && delta != "" {
 				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
 			}
@@ -1735,6 +1725,24 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 				}
 			}
 			return s.sendErrorAndEnd(c, errorMsg)
+		default:
+			// Chat Completions SSE: {choices:[{delta:{content:"..."}}]} and object=chat.completion.chunk
+			if choices, ok := data["choices"].([]any); ok {
+				for _, ch := range choices {
+					choice, ok := ch.(map[string]any)
+					if !ok {
+						continue
+					}
+					delta, _ := choice["delta"].(map[string]any)
+					if content, ok := delta["content"].(string); ok && content != "" {
+						s.sendEvent(c, TestEvent{Type: "content", Text: content})
+					}
+					if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
+						s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+						return nil
+					}
+				}
+			}
 		}
 	}
 }

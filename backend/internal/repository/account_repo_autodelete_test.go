@@ -9,13 +9,15 @@ func TestShouldAutoDeleteFailedAccount(t *testing.T) {
 		want bool
 	}{
 		{name: "empty", msg: "", want: false},
-		{name: "plain fail word", msg: "oauth fail while refreshing", want: true},
-		{name: "capitalized fail", msg: "Fail", want: true},
-		{name: "failed suffix", msg: "refresh token failed", want: true},
-		{name: "failure noun", msg: "permanent failure from upstream", want: true},
-		{name: "status equals fail", msg: "status=Fail", want: true},
-		{name: "quoted fail", msg: "account state 'Fail' detected", want: true},
-		{name: "chinese fail", msg: "账号失败，请删除", want: true},
+		{name: "generic fail should not delete", msg: "oauth fail while refreshing", want: false},
+		{name: "generic failed should not delete", msg: "refresh token failed", want: false},
+		{name: "generic failure should not delete", msg: "permanent failure from upstream", want: false},
+		{name: "api returned 401", msg: "API returned 401: token invalid", want: true},
+		{name: "json status 401", msg: `{"status": 401, "error": {"message":"bad token"}}`, want: true},
+		{name: "token invalidated", msg: "scheduled health probe detected invalid account: token_invalidated", want: true},
+		{name: "token revoked", msg: "authentication token has been invalidated; token_revoked", want: true},
+		{name: "403 should not delete", msg: `Access forbidden (403): {"code":"invalid_workspace_selected"}`, want: false},
+		{name: "429 should not delete", msg: `Rate limit exceeded (429): quota exhausted`, want: false},
 		{name: "unrelated message", msg: "temporary overload cooldown", want: false},
 	}
 
